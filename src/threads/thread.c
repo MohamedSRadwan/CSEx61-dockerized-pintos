@@ -15,6 +15,7 @@
 #include "userprog/process.h"
 #include "filesys/file.h"
 #include "threads/malloc.h"    // malloc, free
+#include "userprog/syscall.h"
 
 #endif
 
@@ -477,8 +478,11 @@ init_thread (struct thread *t, const char *name, int priority)
 
 	// NEW
 	list_init(&t->children);
+	// VERY NEW -> if anything breaks remove this
+	t->executable = NULL;
+
 	t->fd_table = NULL;
-	t->fd_count = 0;
+	t->fd_count = 2;
 	t->my_info = NULL;
 	// EndOfNew
   
@@ -603,21 +607,25 @@ allocate_tid (void)
 uint32_t thread_stack_ofs = offsetof (struct thread, stack);
 
 
+/* operations to deal with file descriptors */
 // REVIEW
 int
 thread_add_file(struct file *f)
 {
   struct thread *cur = thread_current();
   if (cur->fd_table == NULL) {
-    // initialize the table
+    // initialize the table -- lazy initialization
     cur->fd_table = malloc(sizeof(struct file *) * FD_MAX);
-    cur->fd_count = FD_MAX;
-    cur->fd_next = 2; // 0 and 1 are reserved for stdin and stdout
+	for (int i = 0; i < FD_MAX; i++) {
+	  cur->fd_table[i] = NULL;
+	}
+    cur->fd_count = 2;
   }
 
-  for (int i = 2; i < cur->fd_count; i++) {
+  for (int i = 2; i < FD_MAX; i++) {
     if (cur->fd_table[i] == NULL) {
       cur->fd_table[i] = f;
+	  cur->fd_count++; // increase the count of the file descriptors
       return i;
     }
   }
@@ -630,6 +638,7 @@ thread_get_file(int fd)
   struct thread *cur = thread_current();
   if (cur->fd_table == NULL || fd < 2 || fd >= cur->fd_count) {
     return NULL; // invalid fd
+	// exit(-1); // invalid fd, exit the process
   }
   return cur->fd_table[fd];
 }
@@ -638,11 +647,13 @@ void
 thread_close_file(int fd)
 {
   struct thread *cur = thread_current();
-  if (cur->fd_table == NULL || fd < 2 || fd >= cur->fd_count) {
+  if (cur->fd_table == NULL || fd < 2 || fd >= cur->fd_count || cur->fd_table[fd] == NULL) {
     return; // invalid fd
+	// exit(-1); // invalid fd, exit the process
   }
-  file_close(cur->fd_table[fd]);
+  file_close(cur->fd_table[fd]); // actually close the file, from file.c
   cur->fd_table[fd] = NULL;
+  cur->fd_count--; // decrease the count of the file descriptors
 }
 
 void
@@ -658,4 +669,5 @@ thread_close_all_files(void)
       cur->fd_table[i] = NULL;
     }
   }
+  cur->fd_count = 2;
 }

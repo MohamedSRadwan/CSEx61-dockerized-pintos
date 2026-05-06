@@ -9,7 +9,7 @@
 #include "userprog/pagedir.h"
 #include "threads/vaddr.h"
 
-#include "devices/shutdown.h"  // shutdown_power_off
+#include "devices/shutdown.h"  // shutdown_power_off`
 #include "devices/input.h"     // input_getc
 #include "userprog/process.h"  // process_execute, process_wait
 #include "threads/malloc.h"    // malloc, free
@@ -18,6 +18,9 @@
 /**
  * Global lock for the file system */
 struct lock file_lock;
+
+// FIXME
+// this causes race condition
 struct child_process *pending_exec_child;
 
 static void syscall_handler (struct intr_frame *);
@@ -38,6 +41,7 @@ void close(int fd);
 
 void validate_pointer(const void* ptr);
 void validate_buffer(const void* ptr, unsigned size);
+void validate_string(const char *str);
 
 void
 syscall_init (void) 
@@ -71,7 +75,7 @@ syscall_handler (struct intr_frame *f UNUSED)
 {
   // REVIEW
 
-  validate_pointer(f->esp); // validate the user stack pointer before accessing it
+  validate_buffer(f->esp, sizeof(int32_t)); // validate the user stack pointer before accessing it
 
   int32_t *user_stack = (int32_t *) f->esp;
   int SYSCALL_TYPE = user_stack[0];
@@ -81,57 +85,57 @@ syscall_handler (struct intr_frame *f UNUSED)
       break;
     }
     case SYS_EXIT: {
-      validate_pointer(user_stack + 1);
+      validate_buffer(user_stack + 1,sizeof(int32_t));
       int status = user_stack[1];
       exit(status);
       break;
     }
     case SYS_EXEC: {
-      validate_pointer(user_stack + 1);
+      validate_buffer(user_stack + 1,sizeof(int32_t));
       const char* filename = (const char*) user_stack[1];
-      validate_pointer(filename); // validate the filename pointer before accessing it
+      validate_string(filename); // validate the filename pointer before accessing it
       f->eax = exec(filename);
       break;
     }
     case SYS_WAIT:{
-      validate_pointer(user_stack + 1);
+      validate_buffer(user_stack + 1,sizeof(int32_t));
       pid_t pid = (pid_t) user_stack[1];
       f->eax = wait(pid);
       break;
     }
     case SYS_CREATE: {
-      validate_pointer(user_stack + 1);
-      validate_pointer(user_stack + 2);
+      validate_buffer(user_stack + 1,sizeof(int32_t));
+      validate_buffer(user_stack + 2,sizeof(int32_t));
       const char* filename = (const char*) user_stack[1];
-      validate_pointer(filename); // validate the filename pointer before accessing it
+      validate_string(filename); // validate the filename pointer before accessing it
       unsigned initial_size = user_stack[2];
       f->eax = create(filename, initial_size);
       break;
     }
     case SYS_REMOVE: {
-      validate_pointer(user_stack + 1);
+      validate_buffer(user_stack + 1,sizeof(int32_t));
       const char* filename = (const char*) user_stack[1];
-      validate_pointer(filename); // validate the filename pointer before accessing it
+      validate_string(filename); // validate the filename pointer before accessing it
       f->eax = remove(filename);
       break;
     }
     case SYS_OPEN: {
-      validate_pointer(user_stack + 1);
+      validate_buffer(user_stack + 1,sizeof(int32_t));
       const char* filename = (const char*) user_stack[1];
-      validate_pointer(filename); // validate the filename pointer before accessing it
+      validate_string(filename); // validate the filename pointer before accessing it
       f->eax = open(filename);
       break;
     }
     case SYS_FILESIZE: {
-      validate_pointer(user_stack + 1);
+      validate_buffer(user_stack + 1,sizeof(int32_t));
       int fd = user_stack[1];
       f->eax = filesize(fd);
       break;
     }
     case SYS_READ: {
-      validate_pointer(user_stack + 1);
-      validate_pointer(user_stack + 2);
-      validate_pointer(user_stack + 3);
+      validate_buffer(user_stack + 1,sizeof(int32_t));
+      validate_buffer(user_stack + 2,sizeof(int32_t));
+      validate_buffer(user_stack + 3,sizeof(int32_t));
       int fd = user_stack[1];
       void* buffer = (void*) user_stack[2];
       
@@ -142,9 +146,9 @@ syscall_handler (struct intr_frame *f UNUSED)
     }
     case SYS_WRITE:
     {
-      validate_pointer(user_stack + 1);
-      validate_pointer(user_stack + 2);
-      validate_pointer(user_stack + 3);
+      validate_buffer(user_stack + 1,sizeof(int32_t));
+      validate_buffer(user_stack + 2,sizeof(int32_t));
+      validate_buffer(user_stack + 3,sizeof(int32_t));
       int fd = user_stack[1];
       const void* buffer = (const void*) user_stack[2];
       unsigned length = user_stack[3];
@@ -154,8 +158,8 @@ syscall_handler (struct intr_frame *f UNUSED)
     }
     case SYS_SEEK:
     {
-      validate_pointer(user_stack + 1);
-      validate_pointer(user_stack + 2);
+      validate_buffer(user_stack + 1,sizeof(int32_t));
+      validate_buffer(user_stack + 2,sizeof(int32_t));
       int fd = user_stack[1];
       unsigned position = user_stack[2];
       seek(fd, position);
@@ -163,14 +167,14 @@ syscall_handler (struct intr_frame *f UNUSED)
     }
     case SYS_TELL:
     {
-      validate_pointer(user_stack + 1);
+      validate_buffer(user_stack + 1,sizeof(int32_t));
       int fd = user_stack[1];
       f->eax = tell(fd);
       break;
     }
     case SYS_CLOSE:
     {
-      validate_pointer(user_stack + 1);
+      validate_buffer(user_stack + 1,sizeof(int32_t));
       int fd = user_stack[1];
       close(fd);
       break;
@@ -216,6 +220,7 @@ void exit (int status) {
     info->has_exited = true;
   }
 
+
   /* Print the required termination */
   /* Format: "process_name: exit(status)" */
   printf("%s: exit(%d)\n", cur->name, status);
@@ -254,8 +259,13 @@ exec (const char *file) {
     return -1;
   }
 
-  list_push_back(&thread_current()->children, &child->elem);
-  sema_down(&child -> sema);   // parent waits until child finishes loading
+  // list_push_back(&thread_current()->children, &child->elem); // when you come back run the test again 
+  // probably this line the same thread has two different structs so the parent actually waits on one valid then on one dead 
+  // and he end up waiting forever
+  // sema_down(&child -> sema);   // parent waits until child finishes loading
+  // this line was causing issues 
+  // because two distict structures was being created 
+  // and the parent waits on two different semaphores, which causes the parent to wait indefinitely
 
   // parent and child run concurrently, so we need to check if the child loaded successfully or not
 
@@ -321,18 +331,22 @@ open (const char *file) {
 
   lock_acquire(&file_lock); // acquire the global file system lock
   struct file* f = filesys_open(file);
+  lock_release(&file_lock);  // release the global file system lock
+
   if (f == NULL) {
-    lock_release(&file_lock); // release the global file system lock
     return -1;
   }
+
   // actually add the file to the file descriptor table of the current process and return the file descriptor
   int fd = thread_add_file(f);
+  
   if (fd == -1) {
+    lock_acquire(&file_lock); // acquire the global file system lock
     file_close(f);
     lock_release(&file_lock); // release the global file system lock
     return -1;
   }
-  lock_release(&file_lock); // release the global file system lock
+  // lock_release(&file_lock); // release the global file system lock
   return fd;
   
 }
@@ -343,7 +357,10 @@ open (const char *file) {
 int
 filesize (int fd) {
   // convert file descriptor to file pointer
+  lock_acquire(&file_lock); // acquire the global file system lock
   struct file* file = thread_get_file(fd);
+  lock_release(&file_lock); // release the global file system lock
+
   if (file == NULL) {
     return -1;
   }
@@ -380,14 +397,18 @@ read (int fd, void *buffer, unsigned size) {
 int
 write (int fd, const void *buffer, unsigned size) {
 
+  if (fd == 0) return 0; // cannot write to STDIN
   // write to console
   if (fd == 1) { // STDOUT
     putbuf(buffer, size);
     return size;
   }
+  lock_acquire(&file_lock); // acquire the global file system lock
   struct file* file = thread_get_file(fd);
+  lock_release(&file_lock); // release the global file system lock
+
   if (file == NULL) {
-    return -1;
+    return 0; // no data written
   }
   lock_acquire(&file_lock); // acquire the global file system lock
   off_t bytes_written = file_write(file, buffer, size);
@@ -400,7 +421,11 @@ write (int fd, const void *buffer, unsigned size) {
  * Sets the file position to position */
 void
 seek (int fd, unsigned position) {
+
+  lock_acquire(&file_lock); // acquire the global file system lock
   struct file* file = thread_get_file(fd);
+  lock_release(&file_lock); // release the global file system lock
+
   if (file == NULL) {
     return;
   }
@@ -414,7 +439,11 @@ seek (int fd, unsigned position) {
  * Returns the current file position from the start of the file */
 unsigned
 tell (int fd) {
+
+  lock_acquire(&file_lock); // acquire the global file system lock
   struct file* file = thread_get_file(fd);
+  lock_release(&file_lock); // release the global file system lock
+
   if (file == NULL) {
     return -1;
   }
@@ -429,26 +458,62 @@ tell (int fd) {
  * Closes file descriptor */
 void
 close (int fd) {
+
+  lock_acquire(&file_lock); // acquire the global file system lock
   struct file* file = thread_get_file(fd);
+  lock_release(&file_lock); // release the global file system lock
+
   if (file == NULL) {
     return;
   }
-  //TODO : need to remove the file from the file descriptor table of the current process
+  // DONE : need to remove the file from the file descriptor table of the current process
   lock_acquire(&file_lock); // acquire the global file system lock
-  // file_close(file);
+  
   thread_close_file(fd); // remove the file from the file descriptor table of the current process
   lock_release(&file_lock); // release the global file system lock
 }
 
+/* --- pointers validation --- */
+
 void validate_pointer(const void* ptr) {
-  // Check if the pointer is NULL, if it's a user virtual address, and if it points to a valid page in the process's page directory
+  /* Check if the pointer is in user space and mapped */
   if (ptr == NULL || !is_user_vaddr(ptr) || pagedir_get_page(thread_current()->pagedir, ptr) == NULL) {
     exit(-1);
   }
 }
 
 void validate_buffer(const void* ptr, unsigned size) {
-  for (unsigned i = 0; i < size; i++) {
-    validate_pointer((const char*)ptr + i);
+  if (size == 0) return;
+  
+  const char *start = (const char *)ptr;
+  const char *end = start + size - 1;
+
+  /* Validate the start and end of the buffer */
+  validate_pointer(start);
+  validate_pointer(end);
+
+  /* If the buffer spans multiple pages, check each page boundary */
+  for (const char *p = pg_round_up(start); p < end; p += PGSIZE) {
+    validate_pointer(p);
   }
-}  
+}
+/* use me 🥺 i am really sad for you 
+void validate_buffer(const void *addr, unsigned size) {
+    if (addr == NULL || !is_user_vaddr(addr) || !is_user_vaddr(addr + size - 1)) exit(-1);
+    for (uint8_t *p = (uint8_t *)pg_round_down(addr); p <= (uint8_t *)addr; p += PGSIZE)
+        if (pagedir_get_page(thread_current()->pagedir, p) == NULL) exit(-1);
+}
+*/
+
+void validate_string(const char *str) {
+  validate_pointer(str); // Check the start
+  while (true) {
+    // We check the byte before reading it to avoid the fault
+    if (pagedir_get_page(thread_current()->pagedir, str) == NULL) {
+        exit(-1);
+    }
+    if (*str == '\0') break;
+    str++;
+    if (!is_user_vaddr(str)) exit(-1);
+  }
+}

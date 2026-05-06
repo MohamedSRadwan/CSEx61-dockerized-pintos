@@ -102,21 +102,20 @@ struct thread
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
 
+    // REVIEW
+      //  /* File descriptor table */
+      struct file **fd_table;
+      int fd_count;
+      struct file *executable;  // for deny/allow writes
+
+      // NEW
+      struct list children;
+      struct child_process *my_info;  /* the struct owns my data */
+      // EndOfNew
+
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
-
-    // REVIEW
-   //  /* File descriptor table */
-   struct file **fd_table;
-   int fd_count;
-   int fd_next;              // next available fd slot
-   struct file *executable;  // for deny/allow writes
-
-    // NEW
-   struct list children;
-   struct child_process *my_info;  /* the struct owns my data */
-   // EndOfNew
 #endif
 
     /* Owned by thread.c. */

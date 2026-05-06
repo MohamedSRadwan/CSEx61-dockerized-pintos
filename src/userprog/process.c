@@ -26,8 +26,10 @@ static void push_stack(int order, void **esp, char *token, char **argv, int argc
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp, char** save_ptr);
 
-// NEW: global variable to store the child process information when executing a new process
-extern struct child_process *pending_exec_child;
+struct exec_info {
+  char *fn_copy;
+  struct child_process *child;
+};
 
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
@@ -45,24 +47,72 @@ process_execute (const char *file_name)
         return TID_ERROR;
     strlcpy (fn_copy, file_name, PGSIZE);
 
-    /* Parsed file name */
+    /* Allocate exec_info to pass to thread_create */
+    struct exec_info *ei = malloc(sizeof(struct exec_info)); // another struct 
+	// probably the child signal wrong semaphore
+    if (ei == NULL) {
+        palloc_free_page(fn_copy);
+        return TID_ERROR;
+    }
+    
+    struct child_process *child = malloc(sizeof(struct child_process)); // the second struct for the child process 
+    if (child == NULL) {
+        free(ei);
+        palloc_free_page(fn_copy);
+        return TID_ERROR;
+    }
+    
+    // Initialize child process metadata
+    child->pid = -1; // look at its meta data 
+	// i think i started to get it both structs are being pushed with the same pid 
+    child->exit_status = -1;
+    child->has_exited = false;
+    child->was_waited_on = false;
+    child->parent_waiting = false;
+    sema_init(&child->sema, 0);
+    child->child = NULL;
+    
+    ei->fn_copy = fn_copy;
+    ei->child = child;
+
+    // Push child to the parent's list BEFORE thread_create to ensure synchronization
+    list_push_back(&thread_current()->children, &child->elem);
+
+    /* Parse file name for thread_create */
     char *save_ptr;
-    file_name = strtok_r((char *) file_name, " ", &save_ptr);
+    char *parsed_name = strtok_r((char *) file_name, " ", &save_ptr);
 
     /* Create a new thread to execute FILE_NAME. */
-    tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
-    if (tid == TID_ERROR)
+    tid = thread_create (parsed_name, PRI_DEFAULT, start_process, ei);
+    if (tid == TID_ERROR) {
+        list_remove(&child->elem);
+        free(child);
+        free(ei);
         palloc_free_page (fn_copy);
+        return TID_ERROR;
+    }
+	child->pid = tid; // set the child's pid to the tid of the new thread //i have just added this
+    
+    // Wait for the child to finish loading the executable
+    sema_down(&child->sema);
+    
+    if (child->pid == -1) {
+        // Load failed
+        return TID_ERROR;
+    }
+
     return tid;
 }
 
 /* A thread function that loads a user process and starts it
    running. */
 static void
-start_process (void *file_name_)
+start_process (void *ei_)
 {
-  char *file_name = file_name_;
-  struct child_process *child = pending_exec_child;
+  struct exec_info *ei = ei_;
+  char *file_name = ei->fn_copy;
+  struct child_process *child = ei->child;
+  
   struct intr_frame if_;
   bool success;
 
@@ -70,11 +120,10 @@ start_process (void *file_name_)
   char *save_ptr;
   file_name = strtok_r(file_name, " ", &save_ptr);
 
-  if (child != NULL) {
-    thread_current()->my_info = child;
-    child->child = thread_current();
-    child->pid = thread_current()->tid;
-  }
+  /* Set up the child relationship */
+  thread_current()->my_info = child;
+  child->child = thread_current();
+  child->pid = thread_current()->tid; // good it is being set here so no need for the first one
 
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
@@ -83,22 +132,20 @@ start_process (void *file_name_)
   if_.eflags = FLAG_IF | FLAG_MBS;
   success = load (file_name, &if_.eip, &if_.esp, &save_ptr);
 
-  /* If load failed, quit. */
-  palloc_free_page (file_name);
+  /* Free resources now that load is done */
+  palloc_free_page (ei->fn_copy);
+  free(ei);
+  
   if (!success) {
-    pending_exec_child = NULL;
-    if (child != NULL) {
-      child->exit_status = -1;
-      child->pid = -1;
-      child->has_exited = true;
-      sema_up (&child->sema);
-    }
+    child->exit_status = -1;
+    child->pid = -1;
+    child->has_exited = true;
+    sema_up (&child->sema);
     thread_exit ();
   }
 
-  if (child != NULL)
-    sema_up (&child->sema);
-  pending_exec_child = NULL;
+  // Signal the parent that load was successful
+  sema_up (&child->sema);
 
   /* Start the user process. */
   asm volatile ("movl %0, %%esp; jmp intr_exit" : : "g" (&if_) : "memory");
@@ -125,12 +172,22 @@ process_wait (tid_t child_tid)
        e = list_next(e))
   {
     struct child_process *child = list_entry(e, struct child_process, elem);
+
+	// find the child with the matching tid
     if (child->pid == child_tid) {
-      if (child->was_waited_on)
+		// this is probably a dead code 
+		// if you have waited on a child before 
+		// then you would end up freeing its child_process struct
+		// but in either case it should work
+      if (child->was_waited_on){
         return -1;
+	  }
       child->parent_waiting = true;
-      if (!child->has_exited)
+
+	  // wait for the child to exit if it hasn't already
+      if (!child->has_exited) {
         sema_down(&child->sema);
+	  }
       child->was_waited_on = true;
       child->parent_waiting = false;
       list_remove (&child->elem);
@@ -150,11 +207,15 @@ process_exit (void)
   uint32_t *pd;
   struct child_process *my_info = cur->my_info;
 
-  thread_close_all_files();   // your own function
+  // close all files after acquiring the filesys lock to prevent race conditions
+//   lock_acquire(&filesys_done);
+  thread_close_all_files();   // close all open files
+//   lock_release(&filesys_done);
 
+  // Handle executable -> allow writing and close the file
   if (cur->executable != NULL) {
     file_allow_write(cur->executable);
-    file_close(cur->executable);
+    file_close(cur->executable); // close the file, from file.c
     cur->executable = NULL;
   }
 
@@ -165,7 +226,6 @@ process_exit (void)
   } else if (my_info != NULL) {
     my_info->has_exited = true;
     my_info->child = NULL;
-    sema_up (&my_info->sema);
   }
 
   // Clean up children
@@ -174,9 +234,13 @@ process_exit (void)
     struct child_process *child = list_entry (e, struct child_process, elem);
     child->parent_is_dead = true;
     child->parent = NULL;
-    if (child->child == NULL)
+    if (child->child == NULL){
       free (child);
+	  child = NULL;
+	}
   }
+  
+    sema_up (&my_info->sema); //
 
   // Destroy page directory
   pd = cur->pagedir;
@@ -388,7 +452,12 @@ load (const char *file_name, void (**eip) (void), void **esp, char **save_ptr)
 
 	done:
 	/* We arrive here whether the load is successful or not. */
-	file_close (file);
+	if (success) {
+		thread_current()->executable = file;
+		file_deny_write(file);
+	} else {
+		file_close(file);
+	}
 	return success;
 }
 
