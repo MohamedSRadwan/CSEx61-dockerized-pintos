@@ -23,6 +23,7 @@ typedef int tid_t;
 #define PRI_MIN 0                       /* Lowest priority. */
 #define PRI_DEFAULT 31                  /* Default priority. */
 #define PRI_MAX 63                      /* Highest priority. */
+#define FD_MAX 128                     /* Maximum number of file descriptors per process */
 
 /* A kernel thread or user process.
 
@@ -96,6 +97,18 @@ struct thread
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
+
+    // REVIEW
+   //  /* File descriptor table */
+   struct file **fd_table;
+   int fd_count;
+   int fd_next;              // next available fd slot
+   struct file *executable;  // for deny/allow writes
+
+    // NEW
+   struct list children;
+   struct child_process *my_info;  /* the struct owns my data */
+   // EndOfNew
 #endif
 
     /* Owned by thread.c. */
@@ -137,5 +150,10 @@ int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
+
+int thread_add_file(struct file *f);
+struct file *thread_get_file(int fd);
+void thread_close_file(int fd);
+void thread_close_all_files(void);
 
 #endif /* threads/thread.h */
