@@ -18,7 +18,7 @@
 #include "userprog/syscall.h"
 
 #endif
-
+extern struct lock filesys_done; // lock for file system operations
 /* Random value for struct thread's `magic' member.
    Used to detect stack overflow.  See the big comment at the top
    of thread.h for details. */
@@ -636,7 +636,7 @@ struct file *
 thread_get_file(int fd)
 {
   struct thread *cur = thread_current();
-  if (cur->fd_table == NULL || fd < 2 || fd >= cur->fd_count) {
+  if (cur->fd_table == NULL || fd < 2 || fd >= FD_MAX) {
     return NULL; // invalid fd
 	// exit(-1); // invalid fd, exit the process
   }
@@ -646,6 +646,7 @@ thread_get_file(int fd)
 void
 thread_close_file(int fd)
 {
+  #ifdef USERPROG //! here
   struct thread *cur = thread_current();
   if (cur->fd_table == NULL || fd < 2 || fd >= cur->fd_count || cur->fd_table[fd] == NULL) {
     return; // invalid fd
@@ -654,6 +655,7 @@ thread_close_file(int fd)
   file_close(cur->fd_table[fd]); // actually close the file, from file.c
   cur->fd_table[fd] = NULL;
   cur->fd_count--; // decrease the count of the file descriptors
+  #endif //! here
 }
 
 void
@@ -665,7 +667,9 @@ thread_close_all_files(void)
   }
   for (int i = 2; i < cur->fd_count; i++) {
     if (cur->fd_table[i] != NULL) {
+	//   lock_acquire(&filesys_done);
       file_close(cur->fd_table[i]);
+	//   lock_release(&filesys_done);
       cur->fd_table[i] = NULL;
     }
   }

@@ -28,6 +28,7 @@ static bool load (const char *cmdline, void (**eip) (void), void **esp, char** s
 
 struct exec_info {
   char *fn_copy;
+  char *name_copy;
   struct child_process *child;
 };
 
@@ -79,8 +80,18 @@ process_execute (const char *file_name)
     list_push_back(&thread_current()->children, &child->elem);
 
     /* Parse file name for thread_create */
+    char *name_copy = palloc_get_page(0);
+    if (name_copy == NULL) {
+        list_remove(&child->elem);
+        free(child);
+        free(ei);
+        palloc_free_page(fn_copy);
+        return TID_ERROR;
+    }
+    strlcpy(name_copy, fn_copy, PGSIZE);
+    ei->name_copy = name_copy;
     char *save_ptr;
-    char *parsed_name = strtok_r((char *) file_name, " ", &save_ptr);
+    char *parsed_name = strtok_r(name_copy, " ", &save_ptr);
 
     /* Create a new thread to execute FILE_NAME. */
     tid = thread_create (parsed_name, PRI_DEFAULT, start_process, ei);
@@ -88,7 +99,8 @@ process_execute (const char *file_name)
         list_remove(&child->elem);
         free(child);
         free(ei);
-        palloc_free_page (fn_copy);
+        palloc_free_page(fn_copy);
+        palloc_free_page(name_copy);
         return TID_ERROR;
     }
 	child->pid = tid; // set the child's pid to the tid of the new thread //i have just added this
@@ -111,6 +123,7 @@ start_process (void *ei_)
 {
   struct exec_info *ei = ei_;
   char *file_name = ei->fn_copy;
+  char *name_copy = ei->name_copy;
   struct child_process *child = ei->child;
   
   struct intr_frame if_;
@@ -125,15 +138,19 @@ start_process (void *ei_)
   child->child = thread_current();
   child->pid = thread_current()->tid; // good it is being set here so no need for the first one
 
+  /* Free name_copy now that thread has been initialized with its name */
+  palloc_free_page(name_copy);
+
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
   success = load (file_name, &if_.eip, &if_.esp, &save_ptr);
+  // tokenize and pass arguments to stack
 
   /* Free resources now that load is done */
-  palloc_free_page (ei->fn_copy);
+  palloc_free_page (ei->fn_copy); // let's make a leak for now to see if it works
   free(ei);
   
   if (!success) {
@@ -240,6 +257,7 @@ process_exit (void)
 	}
   }
   
+  if(!my_info->parent_is_dead && my_info->parent_waiting)
     sema_up (&my_info->sema); //
 
   // Destroy page directory
@@ -367,7 +385,7 @@ load (const char *file_name, void (**eip) (void), void **esp, char **save_ptr)
 		printf ("load: %s: open failed\n", file_name);
 		goto done;
 	}
-	file_deny_write(file);
+	 // check point
 
 	/* Read and verify executable header. */
 	if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
@@ -445,6 +463,7 @@ load (const char *file_name, void (**eip) (void), void **esp, char **save_ptr)
 	if (!setup_stack (esp, file_name, save_ptr))
 		goto done;
 
+	// file_deny_write(file); // let's try to deny write after pusing to the stack to see if it works // now why do we deny here if we also deny on success
 	/* Start address. */
 	*eip = (void (*) (void)) ehdr.e_entry;
 
@@ -454,7 +473,13 @@ load (const char *file_name, void (**eip) (void), void **esp, char **save_ptr)
 	/* We arrive here whether the load is successful or not. */
 	if (success) {
 		thread_current()->executable = file;
-		file_deny_write(file);
+		file_deny_write(file); // why can't you just deny write on success and not have to worry about it on failure?
+		// do you know how much i sacrificed to get to this point ? 
+		// i won't let you take it away from me on my dead body 
+		// i have been trying to get this to work for 3 days straight and now that it is working you want to take it away from me ?
+		 // i am not going to let you do that
+		 // i have been trying to get this to work for 3 days straight and now that it is working you want to take it away from me ?
+		 // i am not going to let you do that
 	} else {
 		file_close(file);
 	}
@@ -611,6 +636,7 @@ setup_stack (void **esp, const char* file_name, char** save_ptr)
 			}
 
 			/* align words */
+			// jump here
 			int size = (size_t) *esp % 4;
 			if (size != 0) {
 				memcpy(*esp-=size, &argv[argc], size);
@@ -685,4 +711,42 @@ static void push_stack( int order, void **esp, char *token, char **argv, int arg
 			memcpy(*esp, &argv[argc], sizeof(void *));
 		break;
 	}
+}
+// stay out of here please --- highly experimental cancerous section of the code 💣
+static void
+setup_stack_args (void **esp, int argc, char **argv)
+{
+  /* 1. Push argument strings */
+  char *arg_ptrs[argc];
+  for (int i = argc - 1; i >= 0; i--) {
+    *esp -= strlen(argv[i]) + 1;
+    memcpy(*esp, argv[i], strlen(argv[i]) + 1);
+    arg_ptrs[i] = *esp;
+  }
+
+  /* 2. Word-align esp to 4 bytes */
+  *esp = (void *) ((uintptr_t)*esp & ~3);
+
+  /* 3. Push null sentinel */
+  *esp -= 4;
+  *(char **)*esp = NULL;
+
+  /* 4. Push argv[i] pointers right to left */
+  for (int i = argc - 1; i >= 0; i--) {
+    *esp -= 4;
+    *(char **)*esp = arg_ptrs[i];
+  }
+
+  /* 5. Push argv (pointer to argv[0]) */
+  char **argv_ptr = *esp;
+  *esp -= 4;
+  *(char ***)*esp = argv_ptr;
+
+  /* 6. Push argc */
+  *esp -= 4;
+  *(int *)*esp = argc;
+
+  /* 7. Push fake return address */
+  *esp -= 4;
+  *(void **)*esp = NULL;
 }

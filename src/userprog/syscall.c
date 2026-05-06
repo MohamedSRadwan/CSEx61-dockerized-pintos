@@ -231,7 +231,6 @@ void exit (int status) {
 }
 
 
-
 pid_t
 exec (const char *file) {
 
@@ -240,22 +239,11 @@ exec (const char *file) {
   if (child == NULL)
     return -1;
 
-  child->parent = thread_current();
-  child->exit_status = -1;
-  child->has_exited = false;
-  child->parent_waiting = false;
-  child->was_waited_on = false;
-  child->parent_is_dead = false;
-  child->child = NULL;
-  sema_init (&child->sema, 0);
-  pending_exec_child = child;
+  
+  pid_t pid = process_execute(file);
 
-  child->pid = process_execute(file);
-
-  if (child -> pid == TID_ERROR)
+  if (pid == TID_ERROR)
   {     
-    pending_exec_child = NULL;
-    free(child);
     return -1;
   }
 
@@ -270,12 +258,11 @@ exec (const char *file) {
   // parent and child run concurrently, so we need to check if the child loaded successfully or not
 
   // child loaded unsuccessful
-  if (child->pid == -1) {
-    free(child);
+  if (pid == -1) {
     return -1;
   }
 
-  return child->pid;
+  return pid;
 }
 
 // TODO
