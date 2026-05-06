@@ -5,6 +5,10 @@
 #include <list.h>
 #include <stdint.h>
 
+#include <stdlib.h>
+#include "threads/synch.h"
+
+
 /* States in a thread's life cycle. */
 enum thread_status
   {
@@ -24,6 +28,10 @@ typedef int tid_t;
 #define PRI_DEFAULT 31                  /* Default priority. */
 #define PRI_MAX 63                      /* Highest priority. */
 #define FD_MAX 128                     /* Maximum number of file descriptors per process */
+
+struct child_process;                  /* Forward declaration */
+
+
 
 /* A kernel thread or user process.
 

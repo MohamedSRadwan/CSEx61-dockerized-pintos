@@ -37,6 +37,7 @@ unsigned tell(int fd);
 void close(int fd);
 
 void validate_pointer(const void* ptr);
+void validate_buffer(const void* ptr, unsigned size);
 
 void
 syscall_init (void) 
@@ -133,8 +134,9 @@ syscall_handler (struct intr_frame *f UNUSED)
       validate_pointer(user_stack + 3);
       int fd = user_stack[1];
       void* buffer = (void*) user_stack[2];
-      validate_pointer(buffer); // validate the buffer pointer before accessing it
+      
       unsigned length = user_stack[3];
+      validate_buffer(buffer, length); // validate the buffer pointer before accessing it
       f->eax = read(fd, buffer, length);
       break;
     }
@@ -146,7 +148,7 @@ syscall_handler (struct intr_frame *f UNUSED)
       int fd = user_stack[1];
       const void* buffer = (const void*) user_stack[2];
       unsigned length = user_stack[3];
-      validate_pointer(buffer); // validate the buffer pointer before accessing it
+      validate_buffer(buffer, length); // validate the buffer pointer before accessing it
       f->eax = write(fd, buffer, length);
       break;
     }
@@ -444,3 +446,9 @@ void validate_pointer(const void* ptr) {
     exit(-1);
   }
 }
+
+void validate_buffer(const void* ptr, unsigned size) {
+  for (unsigned i = 0; i < size; i++) {
+    validate_pointer((const char*)ptr + i);
+  }
+}  

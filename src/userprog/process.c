@@ -7,6 +7,7 @@
 #include <string.h>
 #include "userprog/gdt.h"
 #include "userprog/pagedir.h"
+#include "userprog/syscall.h"
 #include "userprog/tss.h"
 #include "filesys/directory.h"
 #include "filesys/file.h"
@@ -17,12 +18,16 @@
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "threads/malloc.h"
 
 /* Used for setup_stack */
 static void push_stack(int order, void **esp, char *token, char **argv, int argc);
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp, char** save_ptr);
+
+// NEW: global variable to store the child process information when executing a new process
+extern struct child_process *pending_exec_child;
 
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
@@ -31,25 +36,24 @@ static bool load (const char *cmdline, void (**eip) (void), void **esp, char** s
 tid_t
 process_execute (const char *file_name) 
 {
-	char *fn_copy;
-	tid_t tid;
+    char *fn_copy;
+    tid_t tid;
 
-	/* Make a copy of FILE_NAME.
-     Otherwise there's a race between the caller and load(). */
-	fn_copy = palloc_get_page (0);
-	if (fn_copy == NULL)
-		return TID_ERROR;
-	strlcpy (fn_copy, file_name, PGSIZE);
+    /* Make a copy of FILE_NAME. */
+    fn_copy = palloc_get_page (0);
+    if (fn_copy == NULL)
+        return TID_ERROR;
+    strlcpy (fn_copy, file_name, PGSIZE);
 
-	/* Parsed file name */
-	char *save_ptr;
-	file_name = strtok_r((char *) file_name, " ", &save_ptr);
+    /* Parsed file name */
+    char *save_ptr;
+    file_name = strtok_r((char *) file_name, " ", &save_ptr);
 
-	/* Create a new thread to execute FILE_NAME. */
-	tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
-	if (tid == TID_ERROR)
-		palloc_free_page (fn_copy);
-	return tid;
+    /* Create a new thread to execute FILE_NAME. */
+    tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+    if (tid == TID_ERROR)
+        palloc_free_page (fn_copy);
+    return tid;
 }
 
 /* A thread function that loads a user process and starts it
@@ -57,34 +61,48 @@ process_execute (const char *file_name)
 static void
 start_process (void *file_name_)
 {
-	char *file_name = file_name_;
-	struct intr_frame if_;
-	bool success;
+  char *file_name = file_name_;
+  struct child_process *child = pending_exec_child;
+  struct intr_frame if_;
+  bool success;
 
-	/* the first token is file name */
-	char *save_ptr;
-	file_name = strtok_r(file_name, " ", &save_ptr);
+  /* the first token is file name */
+  char *save_ptr;
+  file_name = strtok_r(file_name, " ", &save_ptr);
 
-	/* Initialize interrupt frame and load executable. */
-	memset (&if_, 0, sizeof if_);
-	if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
-	if_.cs = SEL_UCSEG;
-	if_.eflags = FLAG_IF | FLAG_MBS;
-	success = load (file_name, &if_.eip, &if_.esp, &save_ptr);
+  if (child != NULL) {
+    thread_current()->my_info = child;
+    child->child = thread_current();
+    child->pid = thread_current()->tid;
+  }
 
-	/* If load failed, quit. */
-	palloc_free_page (file_name);
-	if (!success)
-		thread_exit ();
+  /* Initialize interrupt frame and load executable. */
+  memset (&if_, 0, sizeof if_);
+  if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
+  if_.cs = SEL_UCSEG;
+  if_.eflags = FLAG_IF | FLAG_MBS;
+  success = load (file_name, &if_.eip, &if_.esp, &save_ptr);
 
-	/* Start the user process by simulating a return from an
-     interrupt, implemented by intr_exit (in
-     threads/intr-stubs.S).  Because intr_exit takes all of its
-     arguments on the stack in the form of a `struct intr_frame',
-     we just point the stack pointer (%esp) to our stack frame
-     and jump to it. */
-	asm volatile ("movl %0, %%esp; jmp intr_exit" : : "g" (&if_) : "memory");
-	NOT_REACHED ();
+  /* If load failed, quit. */
+  palloc_free_page (file_name);
+  if (!success) {
+    pending_exec_child = NULL;
+    if (child != NULL) {
+      child->exit_status = -1;
+      child->pid = -1;
+      child->has_exited = true;
+      sema_up (&child->sema);
+    }
+    thread_exit ();
+  }
+
+  if (child != NULL)
+    sema_up (&child->sema);
+  pending_exec_child = NULL;
+
+  /* Start the user process. */
+  asm volatile ("movl %0, %%esp; jmp intr_exit" : : "g" (&if_) : "memory");
+  NOT_REACHED ();
 }
 
 /* Waits for thread TID to die and returns its exit status.  If
@@ -97,34 +115,79 @@ start_process (void *file_name_)
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
-process_wait (tid_t child_tid UNUSED) 
+process_wait (tid_t child_tid)
 {
-	return -1;
+  struct thread *cur = thread_current();
+  struct list_elem *e;
+
+  for (e = list_begin(&cur->children);
+       e != list_end(&cur->children);
+       e = list_next(e))
+  {
+    struct child_process *child = list_entry(e, struct child_process, elem);
+    if (child->pid == child_tid) {
+      if (child->was_waited_on)
+        return -1;
+      child->parent_waiting = true;
+      if (!child->has_exited)
+        sema_down(&child->sema);
+      child->was_waited_on = true;
+      child->parent_waiting = false;
+      list_remove (&child->elem);
+      int status = child->exit_status;
+      free (child);
+      return status;
+    }
+  }
+  return -1;
 }
 
 /* Free the current process's resources. */
 void
 process_exit (void)
 {
-	struct thread *cur = thread_current ();
-	uint32_t *pd;
+  struct thread *cur = thread_current();
+  uint32_t *pd;
+  struct child_process *my_info = cur->my_info;
 
-	/* Destroy the current process's page directory and switch back
-     to the kernel-only page directory. */
-	pd = cur->pagedir;
-	if (pd != NULL)
-	{
-		/* Correct ordering here is crucial.  We must set
-         cur->pagedir to NULL before switching page directories,
-         so that a timer interrupt can't switch back to the
-         process page directory.  We must activate the base page
-         directory before destroying the process's page
-         directory, or our active page directory will be one
-         that's been freed (and cleared). */
-		cur->pagedir = NULL;
-		pagedir_activate (NULL);
-		pagedir_destroy (pd);
-	}
+  thread_close_all_files();   // your own function
+
+  if (cur->executable != NULL) {
+    file_allow_write(cur->executable);
+    file_close(cur->executable);
+    cur->executable = NULL;
+  }
+
+  // Handle my_info
+  if (my_info != NULL && my_info->parent_is_dead) {
+    cur->my_info = NULL;
+    free (my_info);
+  } else if (my_info != NULL) {
+    my_info->has_exited = true;
+    my_info->child = NULL;
+    sema_up (&my_info->sema);
+  }
+
+  // Clean up children
+  while (!list_empty (&cur->children)) {
+    struct list_elem *e = list_pop_front (&cur->children);
+    struct child_process *child = list_entry (e, struct child_process, elem);
+    child->parent_is_dead = true;
+    child->parent = NULL;
+    if (child->child == NULL)
+      free (child);
+  }
+
+  // Destroy page directory
+  pd = cur->pagedir;
+  if (pd != NULL) {
+    cur->pagedir = NULL;
+    pagedir_activate (NULL);
+    pagedir_destroy (pd);
+  }
+
+  free (cur->fd_table);
+  cur->fd_table = NULL;
 }
 
 /* Sets up the CPU for running user code in the current

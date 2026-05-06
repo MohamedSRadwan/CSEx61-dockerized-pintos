@@ -13,6 +13,9 @@
 #include "threads/vaddr.h"
 #ifdef USERPROG
 #include "userprog/process.h"
+#include "filesys/file.h"
+#include "threads/malloc.h"    // malloc, free
+
 #endif
 
 /* Random value for struct thread's `magic' member.
@@ -472,6 +475,14 @@ init_thread (struct thread *t, const char *name, int priority)
 	t->priority = priority;
 	t->magic = THREAD_MAGIC;
 
+	// NEW
+	list_init(&t->children);
+	t->fd_table = NULL;
+	t->fd_count = 0;
+	t->my_info = NULL;
+	// EndOfNew
+  
+
 	old_level = intr_disable ();
 	list_push_back (&all_list, &t->allelem);
 	intr_set_level (old_level);
@@ -590,3 +601,61 @@ allocate_tid (void)
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof (struct thread, stack);
+
+
+// REVIEW
+int
+thread_add_file(struct file *f)
+{
+  struct thread *cur = thread_current();
+  if (cur->fd_table == NULL) {
+    // initialize the table
+    cur->fd_table = malloc(sizeof(struct file *) * FD_MAX);
+    cur->fd_count = FD_MAX;
+    cur->fd_next = 2; // 0 and 1 are reserved for stdin and stdout
+  }
+
+  for (int i = 2; i < cur->fd_count; i++) {
+    if (cur->fd_table[i] == NULL) {
+      cur->fd_table[i] = f;
+      return i;
+    }
+  }
+  return -1; // no space left
+}
+
+struct file *
+thread_get_file(int fd)
+{
+  struct thread *cur = thread_current();
+  if (cur->fd_table == NULL || fd < 2 || fd >= cur->fd_count) {
+    return NULL; // invalid fd
+  }
+  return cur->fd_table[fd];
+}
+
+void
+thread_close_file(int fd)
+{
+  struct thread *cur = thread_current();
+  if (cur->fd_table == NULL || fd < 2 || fd >= cur->fd_count) {
+    return; // invalid fd
+  }
+  file_close(cur->fd_table[fd]);
+  cur->fd_table[fd] = NULL;
+}
+
+void
+thread_close_all_files(void)
+{
+  struct thread *cur = thread_current();
+  if (cur->fd_table == NULL) {
+    return; // no files to close
+  }
+  for (int i = 2; i < cur->fd_count; i++) {
+    if (cur->fd_table[i] != NULL) {
+      file_close(cur->fd_table[i]);
+      cur->fd_table[i] = NULL;
+    }
+  }
+}
