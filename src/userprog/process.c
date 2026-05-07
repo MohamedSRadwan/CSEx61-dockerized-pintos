@@ -44,12 +44,12 @@ process_execute (const char *file_name)
 
     /* Make a copy of FILE_NAME. */
     fn_copy = palloc_get_page (0);
-    if (fn_copy == NULL)
+    if (fn_copy == NULL) // no need to free it, it is NULL
         return TID_ERROR;
     strlcpy (fn_copy, file_name, PGSIZE);
 
     /* Allocate exec_info to pass to thread_create */
-    struct exec_info *ei = malloc(sizeof(struct exec_info)); // another struct 
+    struct exec_info *ei = malloc(sizeof(struct exec_info));
 	// probably the child signal wrong semaphore
     if (ei == NULL) {
         palloc_free_page(fn_copy);
@@ -70,8 +70,10 @@ process_execute (const char *file_name)
     child->has_exited = false;
     child->was_waited_on = false;
     child->parent_waiting = false;
+	child->parent_is_dead = false;
     sema_init(&child->sema, 0);
     child->child = NULL;
+	child->parent = thread_current();
     
     ei->fn_copy = fn_copy;
     ei->child = child;
@@ -110,6 +112,10 @@ process_execute (const char *file_name)
     
     if (child->pid == -1) {
         // Load failed
+		// try to free the child_process struct if load failed
+		list_remove(&child->elem);
+		child->parent_is_dead = true; // mark the child as having a dead parent to prevent future synchronization issues
+        // free(child);
         return TID_ERROR;
     }
 
@@ -223,6 +229,7 @@ process_exit (void)
   struct thread *cur = thread_current();
   uint32_t *pd;
   struct child_process *my_info = cur->my_info;
+	// bool notify_parent = false;
 
   // close all files after acquiring the filesys lock to prevent race conditions
 //   lock_acquire(&filesys_done);
@@ -240,25 +247,32 @@ process_exit (void)
   if (my_info != NULL && my_info->parent_is_dead) {
     cur->my_info = NULL;
     free (my_info);
+		my_info = NULL;
   } else if (my_info != NULL) {
     my_info->has_exited = true;
     my_info->child = NULL;
+		// notify_parent = my_info->parent_waiting;
+	
   }
 
   // Clean up children
   while (!list_empty (&cur->children)) {
     struct list_elem *e = list_pop_front (&cur->children);
     struct child_process *child = list_entry (e, struct child_process, elem);
-    child->parent_is_dead = true;
+	// maybe this causes a race condition
+	// if(child!= NULL){
+	child->parent_is_dead = true;
     child->parent = NULL;
+	//}
     if (child->child == NULL){
       free (child);
 	  child = NULL;
 	}
   }
   
-  if(!my_info->parent_is_dead && my_info->parent_waiting)
-    sema_up (&my_info->sema); //
+	// if (notify_parent)
+  	if(!(my_info == NULL) && !(my_info->parent_is_dead))
+    	sema_up (&my_info->sema); //
 
   // Destroy page directory
   pd = cur->pagedir;
@@ -268,7 +282,8 @@ process_exit (void)
     pagedir_destroy (pd);
   }
 
-  free (cur->fd_table);
+  if(cur->fd_table != NULL)
+  	free (cur->fd_table);
   cur->fd_table = NULL;
 }
 

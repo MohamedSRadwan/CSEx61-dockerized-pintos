@@ -19,10 +19,6 @@
  * Global lock for the file system */
 struct lock file_lock;
 
-// FIXME
-// this causes race condition
-struct child_process *pending_exec_child;
-
 static void syscall_handler (struct intr_frame *);
 
 void halt(void);
@@ -200,7 +196,7 @@ halt (void) {
   shutdown_power_off();
 }
 
-// TODO
+// DONE
 /*
   Terminates the current user program, returning status to the kernel.
   If the process’s parent waits for it (see below), 
@@ -235,15 +231,16 @@ pid_t
 exec (const char *file) {
 
   // NEW: create a child process struct to share information between the parent and the child
-  struct child_process* child = malloc(sizeof(struct child_process));
-  if (child == NULL)
-    return -1;
+  // struct child_process* child = malloc(sizeof(struct child_process));
+  // if (child == NULL){
+  //   return -1;        // this struct is weird
+  // }
 
   
   pid_t pid = process_execute(file);
 
   if (pid == TID_ERROR)
-  {     
+  {
     return -1;
   }
 
@@ -265,7 +262,7 @@ exec (const char *file) {
   return pid;
 }
 
-// TODO
+// DONE
 // THIS IS THE HARDEST ONE
 /**
 * Waits for a child process pid and retrieves the child’s exit status.
